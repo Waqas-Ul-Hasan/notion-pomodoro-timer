@@ -1,0 +1,23 @@
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE configurations
+.vscode/
+.idea/
+
+# Local Configurations & Secrets
+config.json
+.env
+secret_channel_id.txt
+
+# Audio cache/assets (if any temporary files generated)
+*.mp3
+*.wav
