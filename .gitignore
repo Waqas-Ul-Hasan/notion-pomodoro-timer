@@ -21,3 +21,9 @@ secret_channel_id.txt
 # Audio cache/assets (if any temporary files generated)
 *.mp3
 *.wav
+!assets/*.wav
+
+# PyInstaller local builds
+build/
+dist/
+*.spec

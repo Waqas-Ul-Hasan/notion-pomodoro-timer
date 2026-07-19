@@ -8,42 +8,112 @@ import uuid
 import time
 import requests
 import ctypes
+import subprocess
 
-# --- 1. ROBUST AUDIO PLAYER ---
-class WindowsAudioPlayer:
+# --- 1. ROBUST CROSS-PLATFORM AUDIO PLAYER ---
+class AudioPlayer:
     def __init__(self):
+        self.platform = sys.platform
+        self.process = None
         self.alias = "pomo_audio"
-        self._mci = ctypes.windll.winmm.mciSendStringW
+        self._mci = None
+        if self.platform == "win32":
+            try:
+                self._mci = ctypes.windll.winmm.mciSendStringW
+            except Exception:
+                pass
 
     def play(self, file_path, loop=False):
         # Stop any existing sound first to prevent overlap or errors
         self.stop()
         
         if not os.path.exists(file_path):
-            # If MP3 files are missing, fall back to standard Windows alert sounds (for alarm, not ticking loop)
             if not loop:
-                try:
-                    import winsound
-                    winsound.PlaySound("SystemHand", winsound.SND_ALIAS | winsound.SND_ASYNC)
-                except:
-                    pass
+                if self.platform == "win32":
+                    try:
+                        import winsound
+                        winsound.PlaySound("SystemHand", winsound.SND_ALIAS | winsound.SND_ASYNC)
+                    except:
+                        pass
+                elif self.platform == "linux":
+                    # Try to play a standard system notification sound
+                    system_sounds = [
+                        "/usr/share/sounds/zorin/stereo/bell.ogg",
+                        "/usr/share/sounds/gnome/default/alerts/string.ogg",
+                        "/usr/share/sounds/gnome/default/alerts/glass.ogg",
+                        "/usr/share/sounds/speech-dispatcher/test.wav",
+                        "/usr/share/sounds/alsa/Front_Center.wav"
+                    ]
+                    played = False
+                    for sound in system_sounds:
+                        if os.path.exists(sound):
+                            try:
+                                if os.path.exists("/usr/bin/paplay") and sound.endswith((".wav", ".ogg")):
+                                    self.process = subprocess.Popen(["paplay", sound], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                else:
+                                    self.process = subprocess.Popen(["cvlc", "--play-and-exit", "--no-video", sound], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                played = True
+                                break
+                            except Exception:
+                                pass
+                    if not played:
+                        print("\a", end="", flush=True)
+                elif self.platform == "darwin":
+                    try:
+                        self.process = subprocess.Popen(["afplay", "/System/Library/Sounds/Glass.aiff"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    except Exception:
+                        pass
             return
 
-        # Open the file
-        cmd_open = f'open "{file_path}" type mpegvideo alias {self.alias}'
-        self._mci(cmd_open, None, 0, 0)
-        
-        # Play command
-        cmd_play = f'play {self.alias} from 0'
-        if loop:
-            cmd_play += " repeat"
-        self._mci(cmd_play, None, 0, 0)
+        if self.platform == "win32" and self._mci:
+            try:
+                cmd_open = f'open "{file_path}" type mpegvideo alias {self.alias}'
+                self._mci(cmd_open, None, 0, 0)
+                cmd_play = f'play {self.alias} from 0'
+                if loop:
+                    cmd_play += " repeat"
+                self._mci(cmd_play, None, 0, 0)
+            except Exception:
+                pass
+        elif self.platform == "linux":
+            try:
+                cmd = ["cvlc", "--no-video"]
+                if loop:
+                    cmd.append("--loop")
+                else:
+                    cmd.append("--play-and-exit")
+                cmd.append(file_path)
+                self.process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                print("\a", end="", flush=True)
+        elif self.platform == "darwin":
+            try:
+                cmd = ["afplay", file_path]
+                self.process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
 
     def stop(self):
-        self._mci(f'stop {self.alias}', None, 0, 0)
-        self._mci(f'close {self.alias}', None, 0, 0)
+        if self.platform == "win32" and self._mci:
+            try:
+                self._mci(f'stop {self.alias}', None, 0, 0)
+                self._mci(f'close {self.alias}', None, 0, 0)
+            except Exception:
+                pass
+        else:
+            if self.process:
+                try:
+                    self.process.terminate()
+                    self.process.wait(timeout=0.2)
+                except Exception:
+                    try:
+                        self.process.kill()
+                    except Exception:
+                        pass
+                self.process = None
 
-audio = WindowsAudioPlayer()
+WindowsAudioPlayer = AudioPlayer
+audio = AudioPlayer()
 
 # --- 2. CONFIG & PATHS ---
 def resource_path(relative_path):
@@ -57,9 +127,9 @@ DEFAULT_CONFIG = {
     "theme": "dark",
     "pomodoro_minutes": 25,
     "break_minutes": 5,
-    "ticking_sound_path": resource_path("ticking.mp3"),
-    "finish_sound_path": resource_path("finish_sound.mp3"),
-    "break_finish_sound_path": resource_path("break_finish_sound.mp3"),
+    "ticking_sound_path": resource_path("ticking.wav"),
+    "finish_sound_path": resource_path("finish_sound.wav"),
+    "break_finish_sound_path": resource_path("break_finish_sound.wav"),
     "secret_channel_id": "", 
     "start_keywords": ["Ongoing", "In Progress"],
     "stop_keywords": ["Done", "Completed", "Archived"],
@@ -71,7 +141,11 @@ app_config = {}
 command_queue = queue.Queue()
 
 def get_app_dir():
-    path = os.path.join(os.getenv('APPDATA'), 'NotionPomodoro') if sys.platform == "win32" else os.path.join(os.path.expanduser('~'), '.NotionPomodoro')
+    if sys.platform == "win32":
+        ap = os.getenv('APPDATA')
+        path = os.path.join(ap, 'NotionPomodoro') if ap else os.path.join(os.path.expanduser('~'), '.NotionPomodoro')
+    else:
+        path = os.path.join(os.path.expanduser('~'), '.NotionPomodoro')
     try: os.makedirs(path, exist_ok=True)
     except: pass
     return path
@@ -102,9 +176,9 @@ def load_config():
             app_config["secret_channel_id"] = f"notion_pomo_{uuid.uuid4().hex}"
     
     # Always enforce correct asset paths
-    app_config["ticking_sound_path"] = resource_path("ticking.mp3")
-    app_config["finish_sound_path"] = resource_path("finish_sound.mp3")
-    app_config["break_finish_sound_path"] = resource_path("break_finish_sound.mp3")
+    app_config["ticking_sound_path"] = resource_path("ticking.wav")
+    app_config["finish_sound_path"] = resource_path("finish_sound.wav")
+    app_config["break_finish_sound_path"] = resource_path("break_finish_sound.wav")
     
     return app_config
 
@@ -143,8 +217,21 @@ def ntfy_listener(stop_event):
 def process_payload(raw_json):
     try:
         data = json.loads(raw_json)
-        status = data.get("data", {}).get("properties", {}).get("Status", {}).get("status", {}).get("name")
-        task = data.get("data", {}).get("properties", {}).get("Name", {}).get("title", [{}])[0].get("plain_text", "Unnamed")
+        properties = data.get("data", {}).get("properties", {})
+        status = None
+        task = "Unnamed"
+        
+        for prop_name, prop_val in properties.items():
+            if isinstance(prop_val, dict):
+                if "title" in prop_val:
+                    title_list = prop_val.get("title", [])
+                    if title_list and isinstance(title_list, list) and len(title_list) > 0:
+                        task = title_list[0].get("plain_text", "Unnamed")
+                elif "status" in prop_val:
+                    status_obj = prop_val.get("status", {})
+                    if isinstance(status_obj, dict):
+                        status = status_obj.get("name")
+                        
         cmd = None
         if status in app_config.get("start_keywords", []): cmd = "start"
         elif status in app_config.get("stop_keywords", []): cmd = "stop"
@@ -202,11 +289,23 @@ class SettingsWindow(ctk.CTkToplevel):
         self.lbl_p.pack(anchor="w", padx=20)
         self.sl_p = ctk.CTkSlider(body, from_=1, to=90, number_of_steps=89, command=lambda v: self.lbl_p.configure(text=f"Pomodoro: {int(v)}"))
         self.sl_p.set(self.config['pomodoro_minutes']); self.sl_p.pack(fill="x", padx=20)
+        try:
+            self.sl_p._canvas.unbind("<MouseWheel>")
+            self.sl_p._canvas.unbind("<Button-4>")
+            self.sl_p._canvas.unbind("<Button-5>")
+        except Exception:
+            pass
         
         self.lbl_b = ctk.CTkLabel(body, text=f"Break: {self.config['break_minutes']}")
         self.lbl_b.pack(anchor="w", padx=20, pady=(10,0))
         self.sl_b = ctk.CTkSlider(body, from_=1, to=30, number_of_steps=29, command=lambda v: self.lbl_b.configure(text=f"Break: {int(v)}"))
         self.sl_b.set(self.config['break_minutes']); self.sl_b.pack(fill="x", padx=20)
+        try:
+            self.sl_b._canvas.unbind("<MouseWheel>")
+            self.sl_b._canvas.unbind("<Button-4>")
+            self.sl_b._canvas.unbind("<Button-5>")
+        except Exception:
+            pass
         
         self.add_section(body, "3. Theme")
         self.theme_menu = ctk.CTkOptionMenu(body, values=["dark", "light", "system"], command=self.master_app.change_theme)
@@ -237,12 +336,17 @@ class PomodoroApp(ctk.CTk):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.overrideredirect(True)
+        
+        self.is_minimizing = False
+        if sys.platform.startswith("linux"):
+            self.attributes('-type', 'splash')
+        else:
+            self.overrideredirect(True)
         
         # Load window position memory
         x = self.config.get("window_x", 100)
         y = self.config.get("window_y", 100)
-        self.geometry(f"400x100+{x}+{y}")
+        self.geometry(f"400x80+{x}+{y}")
         
         self.attributes("-topmost", True)
         self.attributes("-alpha", 0.92)  # Semi-transparent glassmorphism look
@@ -251,6 +355,9 @@ class PomodoroApp(ctk.CTk):
         
         self._ox = 0; self._oy = 0
         self.pomo_state = "IDLE"
+        self.editing_task = False
+        self.editing_time = False
+        self.last_user_task = "Ready"
         self.rem = 0; self.tot = 0; self.job = None
         self.stop_ev = threading.Event()
 
@@ -259,7 +366,7 @@ class PomodoroApp(ctk.CTk):
         # TOP BAR
         top = ctk.CTkFrame(self, fg_color="transparent", height=30); top.grid(row=0, sticky="ew", padx=10, pady=(5,0))
         top.columnconfigure(0, weight=1)
-        self.lbl_task = ctk.CTkLabel(top, text="Ready to Work", font=("Arial", 14)); self.lbl_task.grid(row=0, column=0, sticky="w")
+        self.lbl_task = ctk.CTkLabel(top, text="Ready", font=("Arial", 14)); self.lbl_task.grid(row=0, column=0, sticky="w")
         
         btns = ctk.CTkFrame(top, fg_color="transparent"); btns.grid(row=0, column=1, sticky="e")
         ctk.CTkButton(btns, text="⚙", width=25, height=25, command=lambda: SettingsWindow(self, self.config)).pack(side="left")
@@ -277,21 +384,30 @@ class PomodoroApp(ctk.CTk):
         self.lbl_time = ctk.CTkLabel(ctrl, text="25:00", font=("Arial", 30, "bold"), width=90); self.lbl_time.pack(side="left")
         
         self.btn_play = ctk.CTkButton(ctrl, text="▶", width=30, font=("Arial", 18), command=self.click_play); self.btn_play.pack(side="left", padx=2)
-        self.btn_pause = ctk.CTkButton(ctrl, text="❚❚", width=30, font=("Arial", 18), command=self.click_pause_resume, state="disabled", fg_color="gray"); self.btn_pause.pack(side="left", padx=2)
+        self.btn_pause = ctk.CTkButton(ctrl, text="⏸", width=30, font=("Arial", 18), command=self.click_pause_resume, state="disabled", fg_color="gray"); self.btn_pause.pack(side="left", padx=2)
 
-        self.ent_task = ctk.CTkEntry(self); self.ent_time = ctk.CTkEntry(self)
+        self.ent_task = ctk.CTkEntry(top, height=24, font=("Arial", 12)); self.ent_time = ctk.CTkEntry(self)
 
         # BINDINGS
-        for w in [self, top, self.lbl_task, mid, self.lbl_time, self.prog]:
+        for w in [self, top, mid, self.prog]:
             w.bind("<ButtonPress-1>", self.start_mv)
             w.bind("<B1-Motion>", self.do_mv)
             w.bind("<ButtonRelease-1>", self.save_position)
         
         self.lbl_task.bind("<Button-1>", self.edit_task)
         self.ent_task.bind("<Return>", self.save_task); self.ent_task.bind("<FocusOut>", self.save_task)
+        self.ent_task.bind("<Escape>", self.cancel_edit_task)
+        self.ent_task.bind("<Button-1>", lambda e: self.ent_task._entry.focus_force())
+        self.ent_task._entry.bind("<Button-1>", lambda e: self.ent_task._entry.focus_force())
         self.lbl_time.bind("<Button-1>", self.edit_time)
         self.ent_time.bind("<Return>", self.save_time); self.ent_time.bind("<FocusOut>", self.save_time)
+        self.ent_time.bind("<Escape>", self.cancel_edit_time)
+        self.ent_time.bind("<Button-1>", lambda e: self.ent_time._entry.focus_force())
+        self.ent_time._entry.bind("<Button-1>", lambda e: self.ent_time._entry.focus_force())
+        self.bind_class("Entry", "<Button-1>", lambda event: event.widget.focus_force())
         self.bind("<Map>", self.restore)
+        if sys.platform.startswith("linux"):
+            self.bind("<Unmap>", self.on_unmap)
 
         self.reset_ui()
         threading.Thread(target=ntfy_listener, args=(self.stop_ev,), daemon=True).start()
@@ -300,13 +416,22 @@ class PomodoroApp(ctk.CTk):
     # --- LOGIC START ---
 
     def click_play(self):
+        if self.editing_task: self.save_task(None)
+        if self.editing_time: self.save_time(None)
+        
         # Button 1: Starts new task OR Stops current
         if self.pomo_state == "IDLE":
-            self.start_timer("Manual Task", self.config["pomodoro_minutes"], ticking=True)
+            current_name = self.lbl_task.cget("text")
+            if current_name == "Ready" or not current_name:
+                current_name = "Manual Task"
+            self.start_timer(current_name, self.config["pomodoro_minutes"], ticking=True)
         else:
             self.stop_timer()
 
     def click_pause_resume(self):
+        if self.editing_task: self.save_task(None)
+        if self.editing_time: self.save_time(None)
+        
         # Button 2: Pauses or Resumes
         if self.pomo_state == "RUNNING": self.pause_timer()
         elif self.pomo_state == "PAUSED": self.resume_timer()
@@ -314,7 +439,9 @@ class PomodoroApp(ctk.CTk):
     def start_timer(self, task, mins, ticking=True):
         self.pomo_state = "RUNNING"
         self.lbl_task.configure(text=task)
-        self.rem = int(mins) * 60; self.tot = self.rem
+        if "Break" not in task:
+            self.last_user_task = task
+        self.rem = int(float(mins) * 60); self.tot = self.rem
         
         self.update_buttons()
         self.tick()
@@ -371,19 +498,23 @@ class PomodoroApp(ctk.CTk):
             self.start_timer("Break Time!", self.config["break_minutes"], ticking=False)
 
     def reset_ui(self):
-        if self.pomo_state == "IDLE": self.lbl_task.configure(text="Ready")
-        m = int(self.config["pomodoro_minutes"])
-        self.lbl_time.configure(text=f"{m:02d}:00")
+        if self.pomo_state == "IDLE":
+            current = self.lbl_task.cget("text")
+            if current == "Break Time!" or not current:
+                self.lbl_task.configure(text=self.last_user_task)
+        total_seconds = int(self.config["pomodoro_minutes"] * 60)
+        m, s = divmod(total_seconds, 60)
+        self.lbl_time.configure(text=f"{m:02d}:{s:02d}")
         self.prog.set(1)
         self.update_buttons()
 
     def update_buttons(self):
         if self.pomo_state == "IDLE":
             self.btn_play.configure(text="▶", fg_color=ctk.ThemeManager.theme["CTkButton"]["fg_color"])
-            self.btn_pause.configure(state="disabled", fg_color="gray", text="❚❚")
+            self.btn_pause.configure(state="disabled", fg_color="gray", text="⏸")
         elif self.pomo_state == "RUNNING":
             self.btn_play.configure(text="■", fg_color="#C0392B")
-            self.btn_pause.configure(state="normal", fg_color=ctk.ThemeManager.theme["CTkButton"]["fg_color"], text="❚❚")
+            self.btn_pause.configure(state="normal", fg_color=ctk.ThemeManager.theme["CTkButton"]["fg_color"], text="⏸")
         elif self.pomo_state == "PAUSED":
             self.btn_play.configure(text="■", fg_color="#C0392B")
             self.btn_pause.configure(state="normal", fg_color=ctk.ThemeManager.theme["CTkButton"]["fg_color"], text="▶")
@@ -404,35 +535,102 @@ class PomodoroApp(ctk.CTk):
 
     # Edit / Window
     def edit_task(self, e):
-        self.lbl_task.grid_remove(); self.ent_task.grid(row=0, column=0, sticky="w")
+        if "Break" in self.lbl_task.cget("text"): return
+        if self.editing_task: return
+        self.editing_task = True
+        self.lbl_task.grid_remove()
+        self.ent_task.grid(row=0, column=0, sticky="ew")
         self.ent_task.delete(0, "end")
-        self.ent_task.insert(0, self.lbl_task.cget("text")); self.ent_task.focus()
+        self.ent_task.insert(0, self.lbl_task.cget("text"))
+        self.ent_task.select_range(0, "end")
+        self.ent_task.icursor("end")
+        self.after(50, self.ent_task._entry.focus_force)
+
     def save_task(self, e):
-        self.lbl_task.configure(text=self.ent_task.get()); self.ent_task.delete(0, "end"); self.ent_task.grid_remove(); self.lbl_task.grid()
+        if not self.editing_task: return
+        self.editing_task = False
+        val = self.ent_task.get().strip()
+        if val:
+            self.lbl_task.configure(text=val)
+            self.last_user_task = val
+        else:
+            if self.pomo_state == "IDLE":
+                self.lbl_task.configure(text="Ready")
+                self.last_user_task = "Ready"
+        self.ent_task.delete(0, "end")
+        self.ent_task.grid_remove()
+        self.lbl_task.grid()
+
+    def cancel_edit_task(self, e):
+        if not self.editing_task: return
+        self.editing_task = False
+        self.ent_task.delete(0, "end")
+        self.ent_task.grid_remove()
+        self.lbl_task.grid()
+
     def edit_time(self, e):
         if self.pomo_state not in ["IDLE", "PAUSED"]: return
+        if self.editing_time: return
+        self.editing_time = True
         self.ent_time.place(in_=self.lbl_time, relx=0, rely=0, relwidth=1, relheight=1)
         self.ent_time.delete(0, "end")
-        self.ent_time.insert(0, self.lbl_time.cget("text")); self.ent_time.focus()
+        self.ent_time.insert(0, self.lbl_time.cget("text"))
+        self.ent_time.select_range(0, "end")
+        self.ent_time.icursor("end")
+        self.after(50, self.ent_time._entry.focus_force)
+
     def save_time(self, e):
+        if not self.editing_time: return
+        self.editing_time = False
         try:
-            val = self.ent_time.get()
-            if ":" in val: m, s = map(int, val.split(":"))
-            else: m, s = int(val), 0
-            self.rem = m*60 + s; self.tot = self.rem; self.lbl_time.configure(text=f"{m:02d}:{s:02d}")
+            val = self.ent_time.get().strip()
+            if val:
+                if ":" in val: m, s = map(int, val.split(":"))
+                else: m, s = int(val), 0
+                self.rem = m*60 + s; self.tot = self.rem; self.lbl_time.configure(text=f"{m:02d}:{s:02d}")
+                self.config["pomodoro_minutes"] = m + s / 60.0
+                save_config(self.config)
+                self.config = app_config
         except: pass
-        self.ent_time.delete(0, "end"); self.ent_time.place_forget()
+        self.ent_time.delete(0, "end")
+        self.ent_time.place_forget()
+
+    def cancel_edit_time(self, e):
+        if not self.editing_time: return
+        self.editing_time = False
+        self.ent_time.delete(0, "end")
+        self.ent_time.place_forget()
     def save_position(self, e):
         self.config["window_x"] = self.winfo_x()
         self.config["window_y"] = self.winfo_y()
         save_config(self.config)
         self.config = app_config
 
-    def start_mv(self, e): self._ox = e.x; self._oy = e.y
+    def start_mv(self, e): self.focus_force(); self._ox = e.x; self._oy = e.y
     def do_mv(self, e): self.geometry(f"+{self.winfo_x()+e.x-self._ox}+{self.winfo_y()+e.y-self._oy}")
-    def mini(self): self.overrideredirect(False); self.iconify()
+    
+    def mini(self):
+        if sys.platform.startswith("linux"):
+            self.is_minimizing = True
+            self.attributes('-type', 'normal')
+            self.after(100, self.iconify)
+        else:
+            self.overrideredirect(False)
+            self.iconify()
+            
+    def on_unmap(self, e):
+        if e.widget == self:
+            self.is_minimizing = False
+            
     def restore(self, e): 
-        if self.state() == "normal": self.overrideredirect(True)
+        if e.widget == self and self.state() == "normal":
+            if sys.platform.startswith("linux"):
+                if self.is_minimizing:
+                    return
+                self.after(100, lambda: self.attributes('-type', 'splash'))
+            else:
+                self.after(10, lambda: self.overrideredirect(True))
+                
     def change_theme(self, m): ctk.set_appearance_mode(m)
     def close(self): self.stop_ev.set(); audio.stop(); self.destroy(); sys.exit()
 
