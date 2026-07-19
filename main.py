@@ -20,6 +20,13 @@ class WindowsAudioPlayer:
         self.stop()
         
         if not os.path.exists(file_path):
+            # If MP3 files are missing, fall back to standard Windows alert sounds (for alarm, not ticking loop)
+            if not loop:
+                try:
+                    import winsound
+                    winsound.PlaySound("SystemHand", winsound.SND_ALIAS | winsound.SND_ASYNC)
+                except:
+                    pass
             return
 
         # Open the file
@@ -117,10 +124,15 @@ def ntfy_listener(stop_event):
     while not stop_event.is_set():
         cid = app_config.get("secret_channel_id")
         if not cid: time.sleep(1); continue
+        current_cid = cid
         try:
-            with requests.get(f"https://ntfy.sh/{cid}/json", stream=True, timeout=None) as r:
+            # Set read timeout to 45 seconds to detect dead streams and reconnect cleanly
+            with requests.get(f"https://ntfy.sh/{cid}/json", stream=True, timeout=45) as r:
                 for line in r.iter_lines():
                     if stop_event.is_set(): break
+                    # Reconnect if user changes the channel ID in settings
+                    if app_config.get("secret_channel_id") != current_cid:
+                        break
                     if line:
                         try:
                             obj = json.loads(line)
@@ -164,6 +176,7 @@ class SettingsWindow(ctk.CTkToplevel):
     def __init__(self, master, config):
         super().__init__(master); self.master_app = master; self.config = config.copy()
         self.title("Settings"); self.geometry("500x700"); self.transient(master)
+        self.attributes("-topmost", True)
         self.grid_rowconfigure(1, weight=1); self.grid_columnconfigure(0, weight=1)
         
         header = ctk.CTkFrame(self, corner_radius=0); header.grid(row=0, column=0, sticky="ew"); header.grid_columnconfigure(0, weight=1)
@@ -224,7 +237,16 @@ class PomodoroApp(ctk.CTk):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.overrideredirect(True); self.geometry("400x100"); self.attributes("-topmost", True)
+        self.overrideredirect(True)
+        
+        # Load window position memory
+        x = self.config.get("window_x", 100)
+        y = self.config.get("window_y", 100)
+        self.geometry(f"400x100+{x}+{y}")
+        
+        self.attributes("-topmost", True)
+        self.attributes("-alpha", 0.92)  # Semi-transparent glassmorphism look
+        
         ctk.set_appearance_mode(self.config.get("theme", "dark"))
         
         self._ox = 0; self._oy = 0
@@ -261,7 +283,9 @@ class PomodoroApp(ctk.CTk):
 
         # BINDINGS
         for w in [self, top, self.lbl_task, mid, self.lbl_time, self.prog]:
-            w.bind("<ButtonPress-1>", self.start_mv); w.bind("<B1-Motion>", self.do_mv)
+            w.bind("<ButtonPress-1>", self.start_mv)
+            w.bind("<B1-Motion>", self.do_mv)
+            w.bind("<ButtonRelease-1>", self.save_position)
         
         self.lbl_task.bind("<Button-1>", self.edit_task)
         self.ent_task.bind("<Return>", self.save_task); self.ent_task.bind("<FocusOut>", self.save_task)
@@ -381,12 +405,14 @@ class PomodoroApp(ctk.CTk):
     # Edit / Window
     def edit_task(self, e):
         self.lbl_task.grid_remove(); self.ent_task.grid(row=0, column=0, sticky="w")
+        self.ent_task.delete(0, "end")
         self.ent_task.insert(0, self.lbl_task.cget("text")); self.ent_task.focus()
     def save_task(self, e):
         self.lbl_task.configure(text=self.ent_task.get()); self.ent_task.delete(0, "end"); self.ent_task.grid_remove(); self.lbl_task.grid()
     def edit_time(self, e):
         if self.pomo_state not in ["IDLE", "PAUSED"]: return
         self.ent_time.place(in_=self.lbl_time, relx=0, rely=0, relwidth=1, relheight=1)
+        self.ent_time.delete(0, "end")
         self.ent_time.insert(0, self.lbl_time.cget("text")); self.ent_time.focus()
     def save_time(self, e):
         try:
@@ -396,6 +422,11 @@ class PomodoroApp(ctk.CTk):
             self.rem = m*60 + s; self.tot = self.rem; self.lbl_time.configure(text=f"{m:02d}:{s:02d}")
         except: pass
         self.ent_time.delete(0, "end"); self.ent_time.place_forget()
+    def save_position(self, e):
+        self.config["window_x"] = self.winfo_x()
+        self.config["window_y"] = self.winfo_y()
+        save_config(self.config)
+        self.config = app_config
 
     def start_mv(self, e): self._ox = e.x; self._oy = e.y
     def do_mv(self, e): self.geometry(f"+{self.winfo_x()+e.x-self._ox}+{self.winfo_y()+e.y-self._oy}")
